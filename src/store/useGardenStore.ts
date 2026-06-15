@@ -74,9 +74,17 @@ export const useGardenStore = create<Store>((set, get) => ({
   },
 
   updateNode: (id, updates) => {
+    const positionOnlyKeys = ['x', 'y', 'vx', 'vy'];
+    const updateKeys = Object.keys(updates);
+    const hasContentChange = updateKeys.some((k) => !positionOnlyKeys.includes(k));
+
     set((s) => ({
       nodes: s.nodes.map((n) =>
-        n.id === id ? { ...n, ...updates, updatedAt: Date.now() } : n
+        n.id === id
+          ? hasContentChange
+            ? { ...n, ...updates, updatedAt: Date.now() }
+            : { ...n, ...updates }
+          : n
       ),
     }));
   },
