@@ -1,8 +1,10 @@
 import { motion } from 'framer-motion';
 import { FileText, Code2, Image, Link, Mic, GitBranch } from 'lucide-react';
+import { useGardenStore } from '@/store/useGardenStore';
 import type { KnowledgeNode, NodeType } from '@/types';
 import { NODE_TYPE_LABELS } from '@/types';
 import { cn } from '@/lib/utils';
+import { getColorWithOpacity } from '@/utils/colors';
 import TextNode from './TextNode';
 import CodeNode from './CodeNode';
 import ImageNode from './ImageNode';
@@ -70,14 +72,14 @@ export default function NodeRenderer({
 }: NodeRendererProps) {
   const Icon = NODE_ICONS[node.type];
   const glowColor = glowColorMap[node.color] || 'rgba(16, 185, 129, 0.5)';
+  const allTags = useGardenStore((s) => s.tags);
+  const nodeTags = node.tags
+    .map((tid) => allTags.find((t) => t.id === tid))
+    .filter(Boolean);
 
   return (
     <motion.div
       layout
-      drag
-      dragMomentum={false}
-      dragElastic={0}
-      onDragStart={(e) => onMouseDown(node, e as unknown as React.MouseEvent)}
       onMouseDown={(e) => onMouseDown(node, e)}
       onClick={(e) => {
         e.stopPropagation();
@@ -137,16 +139,23 @@ export default function NodeRenderer({
           {renderNodeContent(node)}
         </div>
 
-        {node.tags.length > 0 && (
+        {nodeTags.length > 0 && (
           <div className="px-4 py-2.5 border-t border-white/10 flex flex-wrap gap-1.5">
-            {node.tags.map((tag, idx) => (
-              <span
-                key={idx}
-                className="badge bg-white/5 text-garden-muted border border-white/10"
-              >
-                #{tag}
-              </span>
-            ))}
+            {nodeTags.map((tag) =>
+              tag ? (
+                <span
+                  key={tag.id}
+                  className="badge text-xs px-2 py-0.5 rounded-full border"
+                  style={{
+                    backgroundColor: getColorWithOpacity(tag.color, 0.12),
+                    color: tag.color,
+                    borderColor: getColorWithOpacity(tag.color, 0.25),
+                  }}
+                >
+                  {tag.name}
+                </span>
+              ) : null
+            )}
           </div>
         )}
       </div>

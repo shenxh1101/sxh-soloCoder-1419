@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useMemo } from 'react';
 import { useCanvas } from '@/hooks/useCanvas';
+import { useForceLayout } from '@/hooks/useForceLayout';
 import { useGardenStore, createNodeAtPosition } from '@/store/useGardenStore';
 import type { NodeType, KnowledgeNode, ConnectState } from '@/types';
 import CanvasBackground from './CanvasBackground';
@@ -16,6 +17,7 @@ interface CanvasProps {
 
 export default function Canvas({ pendingNodeType, setPendingNodeType }: CanvasProps) {
   const { handlers, screenToCanvas } = useCanvas();
+  useForceLayout();
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const nodes = useGardenStore((s) => s.nodes);

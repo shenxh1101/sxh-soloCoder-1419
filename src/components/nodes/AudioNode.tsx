@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Pause, Mic, Square } from 'lucide-react';
+import { useGardenStore } from '@/store/useGardenStore';
 import type { KnowledgeNode, AudioContent } from '@/types';
 import { cn } from '@/lib/utils';
 
@@ -14,7 +15,41 @@ function formatDuration(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function generateWaveformFromBuffer(audioBlob: Blob): Promise<number[]> {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AudioCtx();
+    const arrBuf = await audioBlob.arrayBuffer();
+    const decoded = await ctx.decodeAudioData(arrBuf.slice(0));
+    const channelData = decoded.getChannelData(0);
+    const samples = 60;
+    const blockSize = Math.floor(channelData.length / samples);
+    const waveform: number[] = [];
+    for (let i = 0; i < samples; i++) {
+      let sum = 0;
+      for (let j = 0; j < blockSize; j++) {
+        sum += Math.abs(channelData[i * blockSize + j]);
+      }
+      waveform.push(Math.min(1, (sum / blockSize) * 3));
+    }
+    ctx.close().catch(() => {});
+    return waveform;
+  } catch {
+    return Array.from({ length: 60 }, () => 0.4 + Math.random() * 0.4);
+  }
+}
+
 export default function AudioNode({ node }: AudioNodeProps) {
+  const updateNode = useGardenStore((s) => s.updateNode);
   const content = node.content as AudioContent;
   const waveform = content.waveform || [];
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -24,16 +59,51 @@ export default function AudioNode({ node }: AudioNodeProps) {
   const [duration, setDuration] = useState(content.duration || 0);
   const [recordingBars, setRecordingBars] = useState<number[]>([]);
 
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (audioStreamRef.current) {
+        audioStreamRef.current.getTracks().forEach((t) => t.stop());
+        audioStreamRef.current = null;
+      }
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try { mediaRecorderRef.current.stop(); } catch {}
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!isRecording) return;
-    const interval = setInterval(() => {
-      setRecordingBars((prev) => {
-        const newBars = [...prev, Math.random() * 0.7 + 0.3];
-        return newBars.slice(-40);
-      });
-    }, 100);
-    return () => clearInterval(interval);
-  }, [isRecording]);
+    if (!analyserRef.current) return;
+    const analyser = analyserRef.current;
+    const dataArr = new Uint8Array(analyser.frequencyBinCount);
+    const samples = 40;
+    const tick = () => {
+      analyser.getByteFrequencyData(dataArr);
+      const wave: number[] = [];
+      const step = Math.floor(dataArr.length / samples);
+      for (let i = 0; i < samples; i++) {
+        wave.push(dataArr[i * step] / 255);
+      }
+      setRecordingBars(wave);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [isRecording, analyserRef.current]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -62,10 +132,78 @@ export default function AudioNode({ node }: AudioNodeProps) {
     setIsPlaying(!isPlaying);
   };
 
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      recordedChunksRef.current = [];
+      let mime = 'audio/webm';
+      if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mime = 'audio/webm;codecs=opus';
+      }
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      mediaRecorderRef.current = recorder;
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioCtx();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        const finalMime = mime || 'audio/webm';
+        const blob = new Blob(recordedChunksRef.current, { type: finalMime });
+        if (audioStreamRef.current) {
+          audioStreamRef.current.getTracks().forEach((t) => t.stop());
+          audioStreamRef.current = null;
+        }
+        if (audioCtxRef.current) {
+          audioCtxRef.current.close().catch(() => {});
+          audioCtxRef.current = null;
+        }
+        try {
+          const base64 = await blobToBase64(blob);
+          const newWaveform = await generateWaveformFromBuffer(blob);
+          updateNode(node.id, {
+            content: {
+              ...content,
+              audioUrl: base64,
+              waveform: newWaveform,
+              name: `录音 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+              duration: 0,
+            } as AudioContent,
+          });
+        } catch (err) {
+          console.error('录音保存失败:', err);
+        }
+        setIsRecording(false);
+        setRecordingBars([]);
+      };
+      recorder.start(100);
+      setIsRecording(true);
+    } catch (err) {
+      console.error('无法访问麦克风:', err);
+      alert('无法访问麦克风，请检查浏览器权限设置。');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try { mediaRecorderRef.current.stop(); } catch {}
+    }
+  };
+
   const toggleRecord = () => {
-    setIsRecording(!isRecording);
-    if (isRecording) {
-      setRecordingBars([]);
+    if (!isRecording) {
+      startRecording();
+    } else {
+      stopRecording();
     }
   };
 

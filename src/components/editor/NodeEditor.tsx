@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X,
@@ -19,6 +19,7 @@ import {
   Plus,
   GripVertical,
   Tag as TagIcon,
+  Square,
 } from 'lucide-react';
 import { useGardenStore } from '@/store/useGardenStore';
 import {
@@ -34,6 +35,7 @@ import {
   type MindmapBranch,
 } from '@/types';
 import { generateRandomId, getColorWithOpacity } from '@/utils/colors';
+import { compressImage, fileToDataURL } from '@/utils/image';
 import { cn } from '@/lib/utils';
 import Button from '@/components/ui/Button';
 import TagInput from './TagInput';
@@ -81,6 +83,13 @@ export default function NodeEditor() {
   const [content, setContent] = useState<NodeContent | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const [waveformPreview, setWaveformPreview] = useState<number[]>([]);
 
   useEffect(() => {
     if (node) {
@@ -95,6 +104,22 @@ export default function NodeEditor() {
   const handleClose = () => {
     openEditor(null);
     setShowDeleteConfirm(false);
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((t) => t.stop());
+      audioStreamRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try { mediaRecorderRef.current.stop(); } catch {}
+    }
+    mediaRecorderRef.current = null;
+    recordedChunksRef.current = [];
+    setIsRecording(false);
+    setWaveformPreview([]);
   };
 
   const handleSave = () => {
@@ -194,13 +219,26 @@ export default function NodeEditor() {
 
       case 'image': {
         const imageContent = content as ImageContent;
-        const handleAddImage = (files: FileList | null) => {
+        const handleAddImage = async (files: FileList | null) => {
           if (!files) return;
-          const newImages = Array.from(files).map((file) => ({
-            id: generateRandomId(),
-            url: URL.createObjectURL(file),
-            name: file.name,
-          }));
+          const promises = Array.from(files).map(async (file) => {
+            try {
+              const base64 = await compressImage(file, 1200, 0.8);
+              return {
+                id: generateRandomId(),
+                url: base64,
+                name: file.name,
+              };
+            } catch {
+              const fallback = await fileToDataURL(file);
+              return {
+                id: generateRandomId(),
+                url: fallback,
+                name: file.name,
+              };
+            }
+          });
+          const newImages = await Promise.all(promises);
           setContent({
             images: [...imageContent.images, ...newImages],
           } as ImageContent);
@@ -439,44 +477,171 @@ export default function NodeEditor() {
 
       case 'audio': {
         const audioContent = content as AudioContent;
-        const handleFileUpload = (files: FileList | null) => {
-          if (!files || files.length === 0) return;
-          const file = files[0];
-          const url = URL.createObjectURL(file);
-          setContent({
-            ...audioContent,
-            audioUrl: url,
-            name: file.name,
-          } as AudioContent);
-        };
-        const toggleRecording = () => {
-          if (!isRecording) {
-            setIsRecording(true);
-          } else {
-            setIsRecording(false);
-            setContent({
-              ...audioContent,
-              audioUrl: 'blob:recording-simulated',
-              name: '新录音',
-              duration: 30,
-            } as AudioContent);
+
+        const blobToBase64 = (blob: Blob): Promise<string> =>
+          new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+          });
+
+        const generateWaveformFromBuffer = async (audioBlob: Blob): Promise<number[]> => {
+          try {
+            const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+            const ctx = new AudioCtx();
+            const arrBuf = await audioBlob.arrayBuffer();
+            const decoded = await ctx.decodeAudioData(arrBuf.slice(0));
+            const channelData = decoded.getChannelData(0);
+            const samples = 60;
+            const blockSize = Math.floor(channelData.length / samples);
+            const waveform: number[] = [];
+            for (let i = 0; i < samples; i++) {
+              let sum = 0;
+              for (let j = 0; j < blockSize; j++) {
+                sum += Math.abs(channelData[i * blockSize + j]);
+              }
+              waveform.push(Math.min(1, (sum / blockSize) * 3));
+            }
+            ctx.close().catch(() => {});
+            return waveform;
+          } catch {
+            return Array.from({ length: 60 }, () => 0.4 + Math.random() * 0.4);
           }
         };
+
+        const stopVisualizer = () => {
+          if (rafRef.current) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
+          }
+        };
+
+        const startVisualizer = (stream: MediaStream) => {
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+          const ctx = new AudioCtx();
+          audioCtxRef.current = ctx;
+          const source = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 128;
+          source.connect(analyser);
+          analyserRef.current = analyser;
+          const dataArr = new Uint8Array(analyser.frequencyBinCount);
+          const samples = 40;
+          const tick = () => {
+            analyser.getByteFrequencyData(dataArr);
+            const wave: number[] = [];
+            const step = Math.floor(dataArr.length / samples);
+            for (let i = 0; i < samples; i++) {
+              wave.push(dataArr[i * step] / 255);
+            }
+            setWaveformPreview(wave);
+            rafRef.current = requestAnimationFrame(tick);
+          };
+          tick();
+        };
+
+        const handleFileUpload = async (files: FileList | null) => {
+          if (!files || files.length === 0) return;
+          const file = files[0];
+          try {
+            const base64 = await blobToBase64(file);
+            const waveform = await generateWaveformFromBuffer(file);
+            setContent({
+              ...audioContent,
+              audioUrl: base64,
+              name: file.name,
+              waveform,
+              duration: 0,
+            } as AudioContent);
+          } catch (err) {
+            console.error('音频上传失败:', err);
+          }
+        };
+
+        const toggleRecording = async () => {
+          if (!isRecording) {
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+              audioStreamRef.current = stream;
+              recordedChunksRef.current = [];
+              let mime = 'audio/webm';
+              if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                mime = 'audio/webm;codecs=opus';
+              }
+              const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+              mediaRecorderRef.current = recorder;
+              recorder.ondataavailable = (e) => {
+                if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+              };
+              recorder.onstop = async () => {
+                stopVisualizer();
+                const finalMime = mime || 'audio/webm';
+                const blob = new Blob(recordedChunksRef.current, { type: finalMime });
+                if (audioStreamRef.current) {
+                  audioStreamRef.current.getTracks().forEach((t) => t.stop());
+                  audioStreamRef.current = null;
+                }
+                try {
+                  const base64 = await blobToBase64(blob);
+                  const waveform = await generateWaveformFromBuffer(blob);
+                  setContent({
+                    ...audioContent,
+                    audioUrl: base64,
+                    name: `录音 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+                    waveform,
+                    duration: 0,
+                  } as AudioContent);
+                } catch (err) {
+                  console.error('录音保存失败:', err);
+                }
+                setIsRecording(false);
+                setWaveformPreview([]);
+              };
+              recorder.start(100);
+              startVisualizer(stream);
+              setIsRecording(true);
+            } catch (err) {
+              console.error('无法访问麦克风:', err);
+              alert('无法访问麦克风，请检查浏览器权限设置。');
+            }
+          } else {
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+              try { mediaRecorderRef.current.stop(); } catch {}
+            }
+          }
+        };
+
+        const displayWave = isRecording ? waveformPreview : (audioContent.waveform || []);
+
         return (
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-sm text-garden-muted">
               <TypeIcon className="w-4 h-4" />
               <span>语音备忘</span>
             </div>
+            {isRecording && displayWave.length > 0 && (
+              <div className="flex items-end gap-0.5 h-12 justify-center px-4">
+                {displayWave.map((v, i) => (
+                  <motion.div
+                    key={i}
+                    className="w-1.5 bg-garden-red rounded-full"
+                    style={{ height: `${Math.max(8, v * 100)}%` }}
+                  />
+                ))}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <Button
                 variant={isRecording ? 'danger' : 'ghost'}
                 onClick={toggleRecording}
                 className="py-4 h-auto"
               >
-                <Mic
-                  className={cn('w-5 h-5', isRecording && 'animate-pulse')}
-                />
+                {isRecording ? (
+                  <Square className={cn('w-5 h-5')} />
+                ) : (
+                  <Mic className={cn('w-5 h-5')} />
+                )}
                 {isRecording ? '停止录制' : '开始录制'}
               </Button>
               <label>

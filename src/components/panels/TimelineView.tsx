@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -10,6 +10,8 @@ import {
   GitBranch,
   ArrowRight,
   Calendar,
+  Clock,
+  Edit3,
 } from 'lucide-react';
 import { useGardenStore } from '@/store/useGardenStore';
 import { NODE_TYPE_LABELS, DEFAULT_CANVAS } from '@/types';
@@ -75,8 +77,10 @@ export default function TimelineView() {
   const setCanvas = useGardenStore((s) => s.setCanvas);
   const selectNode = useGardenStore((s) => s.selectNode);
 
+  const [timeMode, setTimeMode] = useState<'createdAt' | 'updatedAt'>('createdAt');
+
   const filteredNodes = getFilteredNodes();
-  const sortedNodes = [...filteredNodes].sort((a, b) => b.createdAt - a.createdAt);
+  const sortedNodes = [...filteredNodes].sort((a, b) => b[timeMode] - a[timeMode]);
 
   const grouped: Record<DateGroup, KnowledgeNode[]> = {
     today: [],
@@ -87,9 +91,12 @@ export default function TimelineView() {
   };
 
   sortedNodes.forEach((node) => {
-    const group = getDateGroup(node.createdAt);
+    const group = getDateGroup(node[timeMode]);
     grouped[group].push(node);
   });
+
+  const isEdited = (node: KnowledgeNode) =>
+    Math.abs(node.updatedAt - node.createdAt) > 2000;
 
   const handleNodeClick = (node: KnowledgeNode) => {
     setCanvas({
@@ -110,14 +117,42 @@ export default function TimelineView() {
   return (
     <div className="flex-1 overflow-x-auto overflow-y-hidden">
       <div className="min-w-full h-full px-8 py-8">
-        <div className="flex items-center gap-3 mb-8 px-4">
-          <Calendar className="w-5 h-5 text-garden-primary" />
-          <h2 className="font-display text-2xl font-semibold text-garden-text">
-            时间轴视图
-          </h2>
-          <span className="text-sm text-garden-muted">
-            共 {sortedNodes.length} 个节点
-          </span>
+        <div className="flex items-center justify-between mb-8 px-4 flex-wrap gap-4">
+          <div className="flex items-center gap-3">
+            <Calendar className="w-5 h-5 text-garden-primary" />
+            <h2 className="font-display text-2xl font-semibold text-garden-text">
+              时间轴视图
+            </h2>
+            <span className="text-sm text-garden-muted">
+              共 {sortedNodes.length} 个节点
+            </span>
+          </div>
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-white/5 border border-white/10">
+            <button
+              onClick={() => setTimeMode('createdAt')}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200',
+                timeMode === 'createdAt'
+                  ? 'bg-garden-primary/20 text-garden-primary shadow-sm'
+                  : 'text-garden-muted hover:text-garden-text'
+              )}
+            >
+              <Clock className="w-3.5 h-3.5" />
+              创建时间
+            </button>
+            <button
+              onClick={() => setTimeMode('updatedAt')}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200',
+                timeMode === 'updatedAt'
+                  ? 'bg-garden-primary/20 text-garden-primary shadow-sm'
+                  : 'text-garden-muted hover:text-garden-text'
+              )}
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              修改时间
+            </button>
+          </div>
         </div>
 
         <div className="relative">
@@ -206,9 +241,24 @@ export default function TimelineView() {
                               'flex items-center gap-1.5 text-xs text-garden-muted pt-2 border-t border-white/5'
                             )}
                           >
-                            <span>{formatTime(node.createdAt)}</span>
+                            <span>{formatTime(node[timeMode])}</span>
                             <span className="opacity-30">•</span>
-                            <span>{formatFullDate(node.createdAt)}</span>
+                            <span>{formatFullDate(node[timeMode])}</span>
+                            {isEdited(node) && timeMode === 'createdAt' && (
+                              <>
+                                <span className="opacity-30">•</span>
+                                <span className="flex items-center gap-0.5 text-amber-400">
+                                  <Edit3 className="w-3 h-3" />
+                                  已编辑
+                                </span>
+                              </>
+                            )}
+                            {timeMode === 'updatedAt' && isEdited(node) && (
+                              <>
+                                <span className="opacity-30">•</span>
+                                <span className="text-garden-primary">最近修改</span>
+                              </>
+                            )}
                           </div>
                         </div>
                       </div>
